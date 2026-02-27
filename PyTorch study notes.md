@@ -5658,3 +5658,2630 @@ train_loader = DataLoader(
 > 参考：[PyTorch 数据加载官方文档](https://pytorch.org/tutorials/beginner/basics/data_tutorial.html)
 
 ---
+
+## 第四章：PyTorch 模型模块
+
+本章介绍深度学习模型的核心构建部分，涵盖 Module 核心类、容器模块、常用网络层、API 函数、Hook 机制和权重初始化等关键主题。
+
+### 4.1 Module 与 Parameter
+
+#### 4.1.1 Module 简介
+
+`nn.Module` 是 PyTorch 中所有神经网络的基类，所有模型都必须继承它。Module 支持嵌套，即一个 Module 可以包含其他 Module，形成树状结构。
+
+Module 通过 **8 个有序字典（OrderedDict）** 来管理自身功能：
+
+| 属性 | 说明 |
+|------|------|
+| `_modules` | 存储 `nn.Module` 子模块 |
+| `_parameters` | 存储 `nn.Parameter` 参数 |
+| `_buffers` | 存储 buffer 属性（如 BN 层的 `running_mean`） |
+| `_forward_pre_hooks` | 前向传播前的 hook |
+| `_forward_hooks` | 前向传播后的 hook |
+| `_backward_hooks` | 反向传播的 hook |
+| `_state_dict_hooks` | state_dict 的 hook |
+| `_load_state_dict_pre_hooks` | 加载 state_dict 前的 hook |
+
+#### 4.1.2 forward 函数
+
+`forward` 函数定义了模型的前向传播逻辑，是 Module 中最核心的方法。正如 `__getitem__` 之于 Dataset，`forward` 之于 Module 同样不可或缺。
+
+所有模型都必须实现 `forward` 方法，否则调用时会抛出 `NotImplementedError`。
+
+#### 4.1.3 模型创建流程
+
+创建模型需要三个步骤：
+
+1. 创建继承自 `nn.Module` 的类
+2. 在 `__init__` 中初始化网络层
+3. 在 `forward` 中定义层的连接方式
+
+```python
+import torch
+import torch.nn as nn
+
+class TinnyCNN(nn.Module):
+    def __init__(self, cls_num):
+        super(TinnyCNN, self).__init__()
+        self.conv1 = nn.Conv2d(3, 16, 3, stride=1, padding=1)
+        self.bn1 = nn.BatchNorm2d(16)
+        self.relu = nn.ReLU(inplace=True)
+        self.pool = nn.AdaptiveAvgPool2d((1, 1))
+        self.fc = nn.Linear(16, cls_num)
+
+    def forward(self, x):
+        x = self.conv1(x)
+        x = self.bn1(x)
+        x = self.relu(x)
+        x = self.pool(x)
+        x = x.view(x.size(0), -1)
+        x = self.fc(x)
+        return x
+
+# 实例化模型
+model = TinnyCNN(cls_num=2)
+
+# 前向传播
+fake_data = torch.randn(1, 3, 32, 32)
+outputs = model(fake_data)
+print(outputs.shape)  # torch.Size([1, 2])
+```
+
+**模型运行流程：**
+
+- `model = TinnyCNN(2)`：调用 `__init__`，初始化各子模块
+- `outputs = model(data)`：调用 `__call__`，内部触发 `forward`，完成前向推理
+
+#### 4.1.4 Parameter 类
+
+`nn.Parameter` 继承自 `Tensor`，用于区分可训练的模型参数和普通张量。模型中的权重（卷积核、偏置等）都被包装为 Parameter 对象，以便优化器自动管理。
+
+```python
+# Parameter 与 Tensor 的区别
+weight = nn.Parameter(torch.randn(3, 3))
+print(weight.requires_grad)  # True（默认开启梯度）
+
+tensor = torch.randn(3, 3)
+print(tensor.requires_grad)  # False（默认关闭梯度）
+```
+
+**关键区别：**
+
+- `Parameter` 默认 `requires_grad=True`，会被 `parameters()` 迭代到
+- 普通 `Tensor` 默认 `requires_grad=False`，不会被优化器更新
+
+---
+
+### 4.2 Module 的容器
+
+容器用于将多个网络层组织在一起，方便管理和使用。
+
+#### 4.2.1 Sequential（最常用）
+
+`nn.Sequential` 按照固定顺序串联网络层，前一层的输出自动作为下一层的输入。
+
+**方式一：直接传入模块**
+
+```python
+model = nn.Sequential(
+    nn.Conv2d(1, 20, 5),
+    nn.ReLU(),
+    nn.Conv2d(20, 64, 5),
+    nn.ReLU()
+)
+```
+
+**方式二：使用 OrderedDict（带命名）**
+
+```python
+from collections import OrderedDict
+
+model = nn.Sequential(OrderedDict([
+    ('conv1', nn.Conv2d(1, 20, 5)),
+    ('relu1', nn.ReLU()),
+    ('conv2', nn.Conv2d(20, 64, 5)),
+    ('relu2', nn.ReLU())
+]))
+```
+
+**Sequential 的 forward 实现：**
+
+```python
+def forward(self, input):
+    for module in self:
+        input = module(input)
+    return input
+```
+
+#### 4.2.2 ModuleList
+
+`nn.ModuleList` 将网络层存储为列表，但不定义 forward 逻辑，需要手动控制前向传播。
+
+```python
+class MyModule(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.linears = nn.ModuleList([nn.Linear(10, 10) for i in range(10)])
+
+    def forward(self, x):
+        for layer in self.linears:
+            x = layer(x)
+        return x
+```
+
+> **注意：** 必须使用 `nn.ModuleList` 而非普通 Python `list`。`ModuleList` 管理的模块会被正确注册和追踪，而普通列表中的模块不会被 `parameters()` 发现，也无法被优化器更新。
+
+#### 4.2.3 ModuleDict
+
+`nn.ModuleDict` 为每个层赋予名称，可以按名字选择性调用：
+
+```python
+class MyModule(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.choices = nn.ModuleDict({
+            'conv': nn.Conv2d(3, 16, 5),
+            'pool': nn.MaxPool2d(3)
+        })
+        self.activations = nn.ModuleDict({
+            'relu': nn.ReLU(),
+            'prelu': nn.PReLU()
+        })
+
+    def forward(self, x, choice, act):
+        x = self.choices[choice](x)
+        x = self.activations[act](x)
+        return x
+```
+
+#### 4.2.4 ParameterList 与 ParameterDict
+
+与 `ModuleList`/`ModuleDict` 类似，但用于管理 `nn.Parameter`：
+
+```python
+class MyModule(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.params = nn.ParameterList([
+            nn.Parameter(torch.randn(10, 10)) for _ in range(3)
+        ])
+        self.param_dict = nn.ParameterDict({
+            'weight': nn.Parameter(torch.randn(10, 10)),
+            'bias': nn.Parameter(torch.randn(10))
+        })
+```
+
+#### 4.2.5 实践案例：AlexNet 结构
+
+经典 CNN 通常将模型分为两部分：
+
+```python
+class AlexNet(nn.Module):
+    def __init__(self, num_classes=1000):
+        super().__init__()
+        # 特征提取部分：卷积 + 池化
+        self.features = nn.Sequential(
+            nn.Conv2d(3, 64, kernel_size=11, stride=4, padding=2),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(kernel_size=3, stride=2),
+            nn.Conv2d(64, 192, kernel_size=5, padding=2),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(kernel_size=3, stride=2),
+            nn.Conv2d(192, 384, kernel_size=3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(384, 256, kernel_size=3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(256, 256, kernel_size=3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(kernel_size=3, stride=2),
+        )
+        # 分类器部分：全连接层
+        self.classifier = nn.Sequential(
+            nn.Dropout(),
+            nn.Linear(256 * 6 * 6, 4096),
+            nn.ReLU(inplace=True),
+            nn.Dropout(),
+            nn.Linear(4096, 4096),
+            nn.ReLU(inplace=True),
+            nn.Linear(4096, num_classes),
+        )
+
+    def forward(self, x):
+        x = self.features(x)
+        x = torch.flatten(x, 1)  # 展平为一维向量
+        x = self.classifier(x)
+        return x
+```
+
+#### 4.2.6 容器使用总结
+
+| 容器 | 特点 | 使用场景 |
+|------|------|---------|
+| `Sequential` | 自动按顺序执行 forward | 简单的线性堆叠网络 |
+| `ModuleList` | 手动控制 forward | 需要循环或条件控制的网络 |
+| `ModuleDict` | 按名称索引 | 需要动态选择子模块的网络 |
+| `ParameterList` | 参数列表 | 管理多个可训练参数 |
+| `ParameterDict` | 参数字典 | 按名称管理可训练参数 |
+
+> **使用频率：** Sequential > ModuleList > 其余为进阶用法。
+
+---
+
+### 4.3 常用网络层
+
+#### 4.3.1 卷积层（Convolutional Layers）
+
+##### 1. nn.Conv2d
+
+二维卷积是 CNN 中最基础的操作：
+
+```python
+nn.Conv2d(
+    in_channels,    # 输入通道数
+    out_channels,   # 输出通道数（卷积核个数）
+    kernel_size,    # 卷积核大小
+    stride=1,       # 步长
+    padding=0,      # 填充
+    dilation=1,     # 膨胀率（空洞卷积）
+    groups=1,       # 分组卷积
+    bias=True,      # 是否使用偏置
+    padding_mode='zeros'  # 填充模式
+)
+```
+
+**输出尺寸计算公式：**
+
+$$H_{out} = \lfloor \frac{H_{in} + 2 \times padding - dilation \times (kernel\_size - 1) - 1}{stride} + 1 \rfloor$$
+
+```python
+# 示例：标准卷积
+conv = nn.Conv2d(3, 16, kernel_size=3, stride=1, padding=1)
+x = torch.randn(1, 3, 32, 32)
+out = conv(x)
+print(out.shape)  # torch.Size([1, 16, 32, 32])
+
+# 示例：下采样卷积
+conv_down = nn.Conv2d(3, 16, kernel_size=3, stride=2, padding=1)
+out = conv_down(x)
+print(out.shape)  # torch.Size([1, 16, 16, 16])
+```
+
+##### 2. 转置卷积（ConvTranspose2d）
+
+转置卷积用于上采样，常用于生成模型和语义分割：
+
+```python
+# 转置卷积：上采样
+deconv = nn.ConvTranspose2d(16, 3, kernel_size=3, stride=2, padding=1, output_padding=1)
+x = torch.randn(1, 16, 16, 16)
+out = deconv(x)
+print(out.shape)  # torch.Size([1, 3, 32, 32])
+```
+
+#### 4.3.2 池化层（Pooling Layers）
+
+池化层用于降低特征图分辨率，减少计算量和参数数量。
+
+```python
+# 最大池化
+max_pool = nn.MaxPool2d(kernel_size=2, stride=2)
+
+# 平均池化
+avg_pool = nn.AvgPool2d(kernel_size=2, stride=2)
+
+# 自适应池化：指定输出尺寸，自动计算 kernel_size 和 stride
+adaptive_pool = nn.AdaptiveAvgPool2d((1, 1))  # 全局平均池化
+
+x = torch.randn(1, 16, 32, 32)
+print(max_pool(x).shape)       # torch.Size([1, 16, 16, 16])
+print(avg_pool(x).shape)       # torch.Size([1, 16, 16, 16])
+print(adaptive_pool(x).shape)  # torch.Size([1, 16, 1, 1])
+```
+
+> **AdaptiveAvgPool2d((1, 1))** 是全局平均池化，无论输入尺寸如何，输出都为 1×1，常用于分类网络的最后一层。
+
+#### 4.3.3 填充层（Padding Layers）
+
+```python
+# 零填充（最常用）
+pad = nn.ZeroPad2d(padding=1)
+
+# 镜像填充
+pad = nn.ReflectionPad2d(padding=1)
+
+# 边界重复填充
+pad = nn.ReplicationPad2d(padding=1)
+
+# 常数填充
+pad = nn.ConstantPad2d(padding=1, value=0)
+```
+
+#### 4.3.4 线性层（Linear Layers）
+
+```python
+# 全连接层
+fc = nn.Linear(in_features=256, out_features=10, bias=True)
+
+x = torch.randn(32, 256)   # batch_size=32, 输入特征=256
+out = fc(x)
+print(out.shape)  # torch.Size([32, 10])
+
+# 恒等映射
+identity = nn.Identity()
+out = identity(x)  # 输出与输入完全相同
+```
+
+#### 4.3.5 标准化层（Normalization Layers）
+
+标准化层是深度学习中稳定训练的关键技术。
+
+##### 1. BatchNorm（批标准化）
+
+对每个通道在 batch 维度上做标准化：
+
+$$y = \frac{x - E[x]}{\sqrt{Var[x] + \epsilon}} \times \gamma + \beta$$
+
+```python
+# BatchNorm2d：用于卷积层
+bn = nn.BatchNorm2d(num_features=16)  # 16 个通道
+
+x = torch.randn(32, 16, 8, 8)  # (batch, channels, H, W)
+out = bn(x)
+print(out.shape)  # torch.Size([32, 16, 8, 8])
+```
+
+**关键特性：**
+
+- 包含可训练参数 $\gamma$（weight）和 $\beta$（bias）
+- 训练时使用当前 batch 的统计量，并更新 `running_mean` 和 `running_var`
+- 推理时使用 `running_mean` 和 `running_var`（训练期间的滑动平均）
+- **训练和推理行为不同，必须正确调用 `model.train()` 和 `model.eval()`**
+
+##### 2. LayerNorm（层标准化）
+
+对每个样本的所有特征做标准化，常用于 NLP/Transformer：
+
+```python
+# LayerNorm：用于序列模型
+ln = nn.LayerNorm(normalized_shape=512)
+
+x = torch.randn(32, 10, 512)  # (batch, seq_len, d_model)
+out = ln(x)
+```
+
+##### 3. GroupNorm（组标准化）
+
+将通道分组后标准化，适用于小 batch 场景：
+
+```python
+# GroupNorm：将 16 个通道分为 4 组
+gn = nn.GroupNorm(num_groups=4, num_channels=16)
+
+x = torch.randn(2, 16, 8, 8)
+out = gn(x)
+```
+
+##### 4. InstanceNorm（实例标准化）
+
+对每个样本的每个通道独立标准化，常用于风格迁移：
+
+```python
+# InstanceNorm2d
+ins_norm = nn.InstanceNorm2d(num_features=16)
+```
+
+**各标准化方法对比：**
+
+| 方法 | 标准化维度 | 适用场景 |
+|------|-----------|---------|
+| BatchNorm | batch 维度 | CNN（大 batch） |
+| LayerNorm | 特征维度 | Transformer / RNN |
+| GroupNorm | 通道分组 | CNN（小 batch） |
+| InstanceNorm | 每个样本每个通道 | 风格迁移 |
+
+#### 4.3.6 Dropout 层
+
+Dropout 在训练时以概率 $p$ 随机将神经元置零，防止过拟合：
+
+```python
+dropout = nn.Dropout(p=0.5)
+
+x = torch.randn(1, 10)
+# 训练模式：随机丢弃
+dropout.train()
+out_train = dropout(x)
+print(out_train)  # 部分元素为 0，其余元素被放大 1/(1-p) 倍
+
+# 推理模式：不丢弃
+dropout.eval()
+out_eval = dropout(x)
+print(out_eval)  # 与输入完全相同
+```
+
+**关键要点：**
+
+- 训练时以概率 $p$ 丢弃，并用 $\frac{1}{1-p}$ 缩放保持期望不变
+- 推理时不丢弃，直接输出
+- **必须正确设置 `model.train()` 和 `model.eval()`**
+
+#### 4.3.7 激活函数（Activation Functions）
+
+##### 常用激活函数
+
+```python
+# ReLU：最常用
+relu = nn.ReLU(inplace=True)
+
+# LeakyReLU：解决 ReLU 的"死神经元"问题
+leaky_relu = nn.LeakyReLU(negative_slope=0.01)
+
+# PReLU：可学习的斜率
+prelu = nn.PReLU()
+
+# Sigmoid：输出范围 (0, 1)
+sigmoid = nn.Sigmoid()
+
+# Tanh：输出范围 (-1, 1)
+tanh = nn.Tanh()
+
+# GELU：Transformer 中常用
+gelu = nn.GELU()
+```
+
+##### Softmax
+
+Softmax 将向量转换为概率分布，所有元素非负且和为 1：
+
+$$Softmax(x_i) = \frac{e^{x_i}}{\sum_j e^{x_j}}$$
+
+```python
+softmax = nn.Softmax(dim=1)
+
+logits = torch.tensor([[2.0, 1.0, 0.1]])
+probs = softmax(logits)
+print(probs)      # tensor([[0.6590, 0.2424, 0.0986]])
+print(probs.sum()) # tensor(1.)
+```
+
+> **注意：** 使用 `nn.CrossEntropyLoss` 时不需要手动添加 Softmax，因为该损失函数内部已包含 Softmax 操作。
+
+---
+
+### 4.4 Module 常用 API 函数
+
+#### 4.4.1 模型状态设置
+
+```python
+model = TinnyCNN(cls_num=2)
+
+# 训练模式：启用 BN 统计和 Dropout
+model.train()
+
+# 评估模式：使用 BN 滑动平均，关闭 Dropout
+model.eval()
+```
+
+> **重要：** 训练和推理时必须切换模式，否则 BN 和 Dropout 的行为不正确，严重影响结果。
+
+#### 4.4.2 设备管理
+
+```python
+# 方式一：使用 to()（推荐）
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+model = model.to(device)
+
+# 方式二：直接调用
+model = model.cpu()
+model = model.cuda()
+model = model.cuda(0)  # 指定 GPU 编号
+```
+
+#### 4.4.3 参数管理
+
+##### 保存与加载模型参数
+
+```python
+# 获取参数字典
+state_dict = model.state_dict()
+print(state_dict.keys())
+
+# 保存参数
+torch.save(model.state_dict(), 'model_weights.pth')
+
+# 加载参数
+model.load_state_dict(torch.load('model_weights.pth'))
+
+# 非严格加载（允许键值不完全匹配）
+model.load_state_dict(torch.load('model_weights.pth'), strict=False)
+```
+
+> **常见错误：** `load_state_dict` 报错通常是因为键值不匹配。使用 `strict=False` 可以忽略不匹配的键，但要注意未加载的参数会保持随机初始化。
+
+#### 4.4.4 模型结构访问
+
+```python
+model = TinnyCNN(cls_num=2)
+
+# 遍历所有参数（用于优化器）
+for name, param in model.named_parameters():
+    print(f"{name}: {param.shape}")
+
+# 遍历所有模块（包含自身）
+for name, module in model.named_modules():
+    print(f"{name}: {module.__class__.__name__}")
+
+# 遍历子模块（不包含自身）
+for name, child in model.named_children():
+    print(f"{name}: {child.__class__.__name__}")
+
+# 获取特定参数或子模块
+param = model.get_parameter('fc.weight')
+submodule = model.get_submodule('conv1')
+```
+
+**modules() vs children() 的区别：**
+
+- `modules()`：递归遍历所有模块，包含模型自身
+- `children()`：只遍历直接子模块，不递归
+
+#### 4.4.5 精度控制
+
+```python
+# 半精度（FP16）：节省显存，加快训练
+model = model.half()
+
+# 单精度（FP32）：默认精度
+model = model.float()
+
+# 双精度（FP64）：更高精度
+model = model.double()
+
+# BFloat16：Google 的 Brain Floating Point 格式
+model = model.bfloat16()
+```
+
+#### 4.4.6 apply() 函数
+
+`apply()` 对所有子模块递归执行指定函数，常用于权重初始化：
+
+```python
+def init_weights(m):
+    if isinstance(m, nn.Linear):
+        nn.init.xavier_uniform_(m.weight)
+        if m.bias is not None:
+            nn.init.zeros_(m.bias)
+    elif isinstance(m, nn.Conv2d):
+        nn.init.kaiming_normal_(m.weight, mode='fan_out')
+
+# 对所有子模块应用初始化函数
+model.apply(init_weights)
+```
+
+#### 4.4.7 zero_grad()
+
+清零所有参数的梯度，在每次反向传播前调用：
+
+```python
+optimizer.zero_grad()   # 推荐方式
+# 或
+model.zero_grad()       # 等价方式
+```
+
+---
+
+### 4.5 Hook 函数及 Grad-CAM
+
+#### 4.5.1 Hook 机制概述
+
+Hook 是一种编程模式，允许在不修改主体代码的情况下实现额外功能。在 PyTorch 中，主体是 forward 和 backward 过程，额外功能包括：
+
+- 提取中间层特征图
+- 获取非叶子张量的梯度
+- 修改梯度值
+
+> **背景：** PyTorch 在每次运算后会释放中间变量（非叶子张量梯度、中间层特征图）以节省内存。Hook 提供了在释放前捕获这些数据的机制。
+
+#### 4.5.2 四种 Hook 函数
+
+##### 1. Tensor.register_hook
+
+在反向传播时自动执行，用于获取或修改张量梯度：
+
+```python
+# 获取非叶子张量的梯度
+y_grad = []
+
+def grad_hook(grad):
+    y_grad.append(grad)
+
+x = torch.tensor([2., 2., 2., 2.], requires_grad=True)
+y = torch.pow(x, 2)
+z = torch.mean(y)
+
+h = y.register_hook(grad_hook)  # 注册 hook
+z.backward()
+
+print(y.grad)       # None（非叶子张量梯度被释放）
+print(y_grad[0])    # tensor([1., 1., 1., 1.])（通过 hook 捕获）
+h.remove()          # 使用后移除 hook
+```
+
+```python
+# 修改梯度：将梯度翻倍
+def double_grad_hook(grad):
+    return grad * 2
+
+x = torch.tensor([2.], requires_grad=True)
+h = x.register_hook(double_grad_hook)
+y = x ** 2
+y.backward()
+print(x.grad)  # tensor([8.])  原本是 4，被翻倍为 8
+h.remove()
+```
+
+##### 2. Module.register_forward_hook
+
+在前向传播完成后自动调用，用于提取中间层输出：
+
+```python
+fmap_block = []
+
+def forward_hook(module, data_input, data_output):
+    fmap_block.append(data_output)
+
+# 注册到特定层
+hook_handle = net.conv1.register_forward_hook(forward_hook)
+output = net(fake_img)
+
+print(fmap_block[0].shape)  # 获取 conv1 的输出特征图
+hook_handle.remove()
+```
+
+> **注意：** `forward_hook` 中不能修改 `input` 或 `output` 的值。
+
+##### 3. Module.register_forward_pre_hook
+
+在 `forward()` 执行**之前**运行：
+
+```python
+def forward_pre_hook(module, data_input):
+    print(f"Input shape: {data_input[0].shape}")
+
+hook_handle = net.conv1.register_forward_pre_hook(forward_pre_hook)
+```
+
+##### 4. Module.register_full_backward_hook
+
+在反向传播完成后自动调用：
+
+```python
+def backward_hook(module, grad_input, grad_output):
+    print(f"Grad output shape: {grad_output[0].shape}")
+
+hook_handle = net.conv1.register_full_backward_hook(backward_hook)
+```
+
+#### 4.5.3 Hook 函数调用顺序
+
+```
+1. 执行 forward_pre_hooks
+2. 执行 forward()
+3. 执行 forward_hooks
+4. （反向传播时）执行 full_backward_hooks
+```
+
+#### 4.5.4 Grad-CAM 实现
+
+Grad-CAM（Gradient-weighted Class Activation Mapping）是基于梯度的类激活图可视化方法，用于理解模型"看"的是图像的哪个区域。
+
+**原理：** 对最后一层卷积的特征图加权求和生成热力图，权值来自特征图相对于目标类别得分的梯度均值。
+
+**实现步骤：**
+
+```python
+import torch
+import torch.nn as nn
+import numpy as np
+
+# 存储特征图和梯度的全局列表
+fmap_block = []
+grad_block = []
+
+# 1. 注册 forward hook 提取最后一层特征图
+def forward_hook(module, input, output):
+    fmap_block.append(output)
+
+# 2. 注册 backward hook 提取梯度
+def backward_hook(module, grad_in, grad_out):
+    grad_block.append(grad_out[0].detach())
+
+# 3. 在目标层注册 hook
+net.conv2.register_forward_hook(forward_hook)
+net.conv2.register_full_backward_hook(backward_hook)
+
+# 4. 前向传播
+output = net(img_tensor)
+
+# 5. 构造目标类别的 one-hot 向量并反向传播
+target_class = output.argmax(dim=1).item()
+one_hot = torch.zeros_like(output)
+one_hot[0][target_class] = 1.0
+output.backward(gradient=one_hot)
+
+# 6. 计算 Grad-CAM
+grads = grad_block[0]                          # 梯度
+fmaps = fmap_block[0]                          # 特征图
+weights = grads.mean(dim=[2, 3], keepdim=True) # 全局平均池化梯度作为权重
+cam = (weights * fmaps).sum(dim=1, keepdim=True)
+cam = torch.relu(cam)                          # ReLU 去除负值
+cam = cam.squeeze().numpy()
+
+# 7. 归一化并可视化
+cam = (cam - cam.min()) / (cam.max() - cam.min())
+# 使用 cv2.resize 缩放到原图大小，叠加显示
+```
+
+#### 4.5.5 Grad-CAM 的启示
+
+通过实验可以发现一个重要现象：模型可能学习了**背景特征**而非目标对象特征。例如，模型将飞机判定为飞机的主要依据可能是蓝色天空背景，而非飞机本身。纯蓝色图片也可能被判定为飞机。
+
+这揭示了：
+
+- 模型可能存在"捷径学习"（Shortcut Learning）
+- 数据集中的偏差会被模型利用
+- Grad-CAM 是发现这类问题的有力工具
+- 需要通过数据增强、对抗训练等方法来缓解
+
+---
+
+### 4.6 经典模型代码分析
+
+本节分析 torchvision 中经典卷积神经网络的代码结构和设计模式。
+
+#### 4.6.1 AlexNet
+
+- **结构：** 特征提取（卷积层） + 分类器（全连接层）
+- **设计模式：** 独立的类定义 + 包装函数（用于加载预训练权重）
+- **关键技术：** 使用 `torch.flatten()` 将 2D 特征图转为 1D 向量
+
+#### 4.6.2 VGG
+
+- **变体：** VGG11、VGG13、VGG16、VGG19（不同深度）
+- **核心抽象：** `make_layers()` 函数根据配置字典构建卷积块
+- **配置格式：** 列表表示通道数，`'M'` 表示 MaxPool2d
+
+```python
+# VGG 配置示例
+cfgs = {
+    'A': [64, 'M', 128, 'M', 256, 256, 'M', 512, 512, 'M', 512, 512, 'M'],           # VGG11
+    'D': [64, 64, 'M', 128, 128, 'M', 256, 256, 256, 'M', 512, 512, 512, 'M', 512, 512, 512, 'M'],  # VGG16
+}
+
+def make_layers(cfg, batch_norm=False):
+    layers = []
+    in_channels = 3
+    for v in cfg:
+        if v == 'M':
+            layers.append(nn.MaxPool2d(kernel_size=2, stride=2))
+        else:
+            conv = nn.Conv2d(in_channels, v, kernel_size=3, padding=1)
+            if batch_norm:
+                layers += [conv, nn.BatchNorm2d(v), nn.ReLU(inplace=True)]
+            else:
+                layers += [conv, nn.ReLU(inplace=True)]
+            in_channels = v
+    return nn.Sequential(*layers)
+```
+
+#### 4.6.3 GoogLeNet
+
+- **创新：** Inception 模块（多分支特征提取）
+- **设计模式：** 将可复用组件（BasicConv2d、Inception、InceptionAux）抽象为独立的 Module 类
+- **优势：** 模块化设计，便于替换组件而不修改主体架构
+
+#### 4.6.4 ResNet
+
+- **变体：** ResNet-18、34、50、101、152
+- **核心创新：** 残差块（Residual Block）
+
+```python
+# ResNet 的残差连接
+class BasicBlock(nn.Module):
+    def __init__(self, in_channels, out_channels, stride=1, downsample=None):
+        super().__init__()
+        self.conv1 = nn.Conv2d(in_channels, out_channels, 3, stride, 1)
+        self.bn1 = nn.BatchNorm2d(out_channels)
+        self.conv2 = nn.Conv2d(out_channels, out_channels, 3, 1, 1)
+        self.bn2 = nn.BatchNorm2d(out_channels)
+        self.downsample = downsample
+        self.relu = nn.ReLU(inplace=True)
+
+    def forward(self, x):
+        identity = x
+        out = self.relu(self.bn1(self.conv1(x)))
+        out = self.bn2(self.conv2(out))
+        if self.downsample is not None:
+            identity = self.downsample(x)
+        out += identity   # 残差连接
+        out = self.relu(out)
+        return out
+```
+
+- **灵活性：** 通过参数控制 Block 类型和堆叠数量
+  - ResNet-18/34 使用 `BasicBlock`
+  - ResNet-50/101/152 使用 `Bottleneck`
+
+#### 4.6.5 经典模型设计原则
+
+1. **抽象可复用模块：** 将重复的组件提取为独立的类
+2. **参数化架构：** 使用配置字典/列表生成不同变体
+3. **关注点分离：** 模型类定义结构，包装函数处理预训练权重
+4. **合理初始化：** 权重初始化对训练成败影响很大
+
+---
+
+### 4.7 权重初始化方法
+
+权重初始化对训练过程至关重要，不当的初始化会导致梯度消失或爆炸。
+
+#### 4.7.1 Xavier 初始化
+
+适用于 Sigmoid 和 Tanh 激活函数，保持输入输出的方差一致。
+
+```python
+# Xavier 均匀分布初始化
+# 参数范围：U(-a, a)，其中 a = gain × √(6 / (fan_in + fan_out))
+nn.init.xavier_uniform_(tensor, gain=1.0)
+
+# Xavier 正态分布初始化
+# std = gain × √(2 / (fan_in + fan_out))
+nn.init.xavier_normal_(tensor, gain=1.0)
+```
+
+> 参考论文：Glorot & Bengio (2010), "Understanding the difficulty of training deep feedforward neural networks"
+
+#### 4.7.2 Kaiming 初始化
+
+适用于 ReLU 系列激活函数，考虑了 ReLU 将一半值置零的特性。
+
+```python
+# Kaiming 均匀分布初始化
+# bound = √(6 / ((1 + a²) × fan_in))
+nn.init.kaiming_uniform_(tensor, a=0, mode='fan_in', nonlinearity='leaky_relu')
+
+# Kaiming 正态分布初始化
+# std = √(2 / ((1 + a²) × fan_in))
+nn.init.kaiming_normal_(tensor, a=0, mode='fan_in', nonlinearity='relu')
+```
+
+**参数说明：**
+
+- `a`：LeakyReLU 的负斜率（ReLU 时为 0）
+- `mode`：`'fan_in'` 保持前向传播方差，`'fan_out'` 保持反向传播方差
+- `nonlinearity`：激活函数类型
+
+> 参考论文：He et al. (2015), "Delving Deep into Rectifiers"
+
+#### 4.7.3 其他初始化方法
+
+```python
+# 均匀分布
+nn.init.uniform_(tensor, a=0.0, b=1.0)
+
+# 正态分布
+nn.init.normal_(tensor, mean=0.0, std=1.0)
+
+# 常数初始化
+nn.init.constant_(tensor, val=0.0)
+
+# 全零 / 全一
+nn.init.zeros_(tensor)
+nn.init.ones_(tensor)
+
+# 单位矩阵初始化（仅用于 2D 张量）
+nn.init.eye_(tensor)
+
+# 正交初始化（保持矩阵正交性）
+nn.init.orthogonal_(tensor, gain=1.0)
+
+# 稀疏初始化
+nn.init.sparse_(tensor, sparsity=0.1)
+
+# Dirac 初始化（用于卷积层，保持输入不变）
+nn.init.dirac_(tensor, groups=1)
+```
+
+#### 4.7.4 实践：按层类型初始化
+
+```python
+def initialize_weights(model):
+    """根据层类型应用不同的初始化策略。"""
+    for m in model.modules():
+        if isinstance(m, nn.Conv2d):
+            # 卷积层使用 Kaiming 初始化
+            nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+            if m.bias is not None:
+                nn.init.constant_(m.bias, 0)
+        elif isinstance(m, nn.BatchNorm2d):
+            # BN 层：weight=1, bias=0
+            nn.init.constant_(m.weight, 1)
+            nn.init.constant_(m.bias, 0)
+        elif isinstance(m, nn.Linear):
+            # 全连接层使用正态分布初始化
+            nn.init.normal_(m.weight, 0, 0.01)
+            nn.init.constant_(m.bias, 0)
+
+# 使用
+model = TinnyCNN(cls_num=2)
+initialize_weights(model)
+# 或使用 apply
+model.apply(initialize_weights)
+```
+
+#### 4.7.5 Gain 值参考
+
+`nn.init.calculate_gain()` 返回不同激活函数推荐的增益值：
+
+| 激活函数 | Gain 值 |
+|---------|--------|
+| Linear / Identity | 1 |
+| Conv{1,2,3}D | 1 |
+| Sigmoid | 1 |
+| Tanh | 5/3 ≈ 1.6667 |
+| ReLU | √2 ≈ 1.4142 |
+| LeakyReLU(0.01) | √(2 / (1 + 0.01²)) ≈ 1.4142 |
+
+```python
+gain = nn.init.calculate_gain('relu')
+print(gain)  # 1.4142135623730951
+```
+
+#### 4.7.6 初始化方法选择指南
+
+| 激活函数 | 推荐初始化方法 |
+|---------|--------------|
+| ReLU / LeakyReLU | Kaiming 初始化 |
+| Sigmoid / Tanh | Xavier 初始化 |
+| SELU | LeCun 正态分布 |
+| 无激活函数 | Xavier 或均匀分布 |
+
+> **最佳实践：** 现代框架（如 PyTorch）的 nn 层已有合理的默认初始化。通常不需要手动初始化，除非有特殊需求或发现训练不稳定。
+
+---
+
+### 4.8 第四章总结
+
+本章介绍了 PyTorch 模型模块的核心内容：
+
+1. **Module 与 Parameter**
+   - Module 是所有神经网络的基类，通过 8 个有序字典管理属性
+   - Parameter 是可训练参数，默认开启梯度
+   - 模型创建三步：继承 Module → `__init__` 初始化层 → `forward` 定义连接
+
+2. **容器**
+   - Sequential：最常用，自动按顺序执行
+   - ModuleList/ModuleDict：手动控制前向传播，灵活性更高
+   - 必须使用 nn 容器而非 Python 原生容器
+
+3. **常用网络层**
+   - 卷积层、池化层、线性层、标准化层、Dropout、激活函数
+   - BN 和 Dropout 在训练/推理时行为不同
+
+4. **Module API**
+   - `train()`/`eval()`：切换训练/推理模式
+   - `state_dict()`/`load_state_dict()`：参数保存和加载
+   - `to(device)`：设备迁移
+   - `apply()`：递归应用函数
+
+5. **Hook 函数**
+   - 四种 Hook：Tensor hook、forward hook、forward pre hook、backward hook
+   - Grad-CAM：可视化模型关注区域，发现模型偏差
+
+6. **经典模型**
+   - AlexNet、VGG、GoogLeNet、ResNet 的设计模式
+   - 模块化、参数化、关注点分离
+
+7. **权重初始化**
+   - Xavier 适用于 Sigmoid/Tanh
+   - Kaiming 适用于 ReLU
+   - 按层类型应用不同初始化策略
+
+> 参考：[PyTorch nn.Module 官方文档](https://pytorch.org/docs/stable/generated/torch.nn.Module.html)
+
+---
+
+## 第五章：PyTorch 优化模块
+
+本章介绍模型优化过程中涉及的三大核心概念：损失函数、优化器和学习率调整。
+
+### 5.1 损失函数
+
+损失函数（Loss Function）衡量模型预测值与真实值之间的差距，是优化的目标。PyTorch 在 `torch.nn` 中提供了 21 个损失函数。
+
+#### 5.1.1 常用损失函数
+
+##### 1. nn.L1Loss（平均绝对误差）
+
+计算预测值与目标值的绝对差：
+
+$$L = \frac{1}{n} \sum_{i=1}^{n} |y_i - \hat{y}_i|$$
+
+```python
+loss_fn = nn.L1Loss(reduction='mean')  # 'mean', 'sum', 'none'
+
+pred = torch.tensor([1.0, 2.0, 3.0])
+target = torch.tensor([1.5, 2.5, 3.5])
+loss = loss_fn(pred, target)
+print(loss)  # tensor(0.5000)
+```
+
+##### 2. nn.MSELoss（均方误差）
+
+计算预测值与目标值的平方差：
+
+$$L = \frac{1}{n} \sum_{i=1}^{n} (y_i - \hat{y}_i)^2$$
+
+```python
+loss_fn = nn.MSELoss(reduction='mean')
+
+pred = torch.tensor([1.0, 2.0, 3.0])
+target = torch.tensor([1.5, 2.5, 3.5])
+loss = loss_fn(pred, target)
+print(loss)  # tensor(0.2500)
+```
+
+##### 3. nn.CrossEntropyLoss（交叉熵损失）
+
+分类任务中最常用的损失函数，内部先做 Softmax 再计算交叉熵：
+
+$$L = -\sum_{c=1}^{C} y_c \log(\hat{y}_c)$$
+
+```python
+loss_fn = nn.CrossEntropyLoss(
+    weight=None,          # 各类别权重（处理类别不平衡）
+    ignore_index=-100,    # 忽略的类别索引
+    label_smoothing=0.0,  # 标签平滑（0.01-0.1）
+    reduction='mean'
+)
+
+# 注意：target 是类别索引（整数），不需要 one-hot 编码
+logits = torch.randn(3, 5)       # (batch_size=3, num_classes=5)
+target = torch.tensor([1, 0, 4])  # 类别索引，范围 [0, C-1]
+loss = loss_fn(logits, target)
+```
+
+**关键注意事项：**
+
+- 输入是未经 Softmax 的 logits（原始分数）
+- target 必须是整数类型，范围 `[0, C-1]`
+- 不需要手动添加 Softmax 层
+- `label_smoothing` 是正则化技术，将硬标签变为软标签
+
+##### 4. nn.BCELoss（二元交叉熵）
+
+用于二分类任务，输入必须经过 Sigmoid：
+
+```python
+sigmoid = nn.Sigmoid()
+loss_fn = nn.BCELoss()
+
+logits = torch.randn(3)
+pred = sigmoid(logits)            # 必须先 Sigmoid
+target = torch.tensor([1., 0., 1.])
+loss = loss_fn(pred, target)
+```
+
+##### 5. nn.BCEWithLogitsLoss
+
+将 Sigmoid 和 BCELoss 合并，数值更稳定：
+
+```python
+loss_fn = nn.BCEWithLogitsLoss()
+
+logits = torch.randn(3)           # 不需要先 Sigmoid
+target = torch.tensor([1., 0., 1.])
+loss = loss_fn(logits, target)
+```
+
+##### 6. nn.NLLLoss（负对数似然损失）
+
+常与 `nn.LogSoftmax` 配合使用：
+
+```python
+log_softmax = nn.LogSoftmax(dim=1)
+loss_fn = nn.NLLLoss()
+
+logits = torch.randn(3, 5)
+log_probs = log_softmax(logits)
+target = torch.tensor([1, 0, 4])
+loss = loss_fn(log_probs, target)
+```
+
+> **注意：** `nn.CrossEntropyLoss` = `nn.LogSoftmax` + `nn.NLLLoss`
+
+##### 7. nn.KLDivLoss（KL 散度）
+
+衡量两个概率分布的差异，常用于知识蒸馏：
+
+```python
+loss_fn = nn.KLDivLoss(reduction='batchmean')
+
+# 输入必须是 log 概率
+log_probs = torch.log_softmax(torch.randn(3, 5), dim=1)
+target_probs = torch.softmax(torch.randn(3, 5), dim=1)
+loss = loss_fn(log_probs, target_probs)
+```
+
+##### 8. nn.SmoothL1Loss / nn.HuberLoss
+
+结合 L1 和 L2 的优点，对异常值更鲁棒：
+
+```python
+loss_fn = nn.SmoothL1Loss(beta=1.0)
+# 当 |x| < beta 时使用 L2，否则使用 L1
+
+loss_fn = nn.HuberLoss(delta=1.0)
+# 与 SmoothL1Loss 类似
+```
+
+##### 9. nn.TripletMarginLoss（三元组损失）
+
+用于度量学习（如人脸识别），让正样本更近、负样本更远：
+
+```python
+loss_fn = nn.TripletMarginLoss(margin=1.0)
+
+anchor = torch.randn(32, 128)    # 锚点样本
+positive = torch.randn(32, 128)  # 正样本（与锚点同类）
+negative = torch.randn(32, 128)  # 负样本（与锚点不同类）
+loss = loss_fn(anchor, positive, negative)
+```
+
+#### 5.1.2 损失函数的实现架构
+
+所有损失函数遵循统一的设计模式：
+
+```
+nn.Module → forward() → F.xxx_loss() → C++ 后端计算
+```
+
+#### 5.1.3 损失函数选择指南
+
+| 任务类型 | 推荐损失函数 |
+|---------|------------|
+| 多分类 | CrossEntropyLoss |
+| 二分类 | BCEWithLogitsLoss |
+| 回归 | MSELoss / SmoothL1Loss |
+| 度量学习 | TripletMarginLoss |
+| 知识蒸馏 | KLDivLoss |
+| 语义分割 | CrossEntropyLoss（带 weight） |
+
+#### 5.1.4 PyTorch 全部 21 个损失函数
+
+| 损失函数 | 用途 |
+|---------|------|
+| `nn.L1Loss` | 回归（平均绝对误差） |
+| `nn.MSELoss` | 回归（均方误差） |
+| `nn.CrossEntropyLoss` | 多分类 |
+| `nn.NLLLoss` | 配合 LogSoftmax 的分类 |
+| `nn.PoissonNLLLoss` | 泊松分布的负对数似然 |
+| `nn.GaussianNLLLoss` | 高斯分布的负对数似然 |
+| `nn.KLDivLoss` | KL 散度 |
+| `nn.BCELoss` | 二分类（需 Sigmoid） |
+| `nn.BCEWithLogitsLoss` | 二分类（内含 Sigmoid） |
+| `nn.MarginRankingLoss` | 排序学习 |
+| `nn.HingeEmbeddingLoss` | 相似性判断 |
+| `nn.MultiLabelMarginLoss` | 多标签分类 |
+| `nn.HuberLoss` | 鲁棒回归 |
+| `nn.SmoothL1Loss` | 鲁棒回归 |
+| `nn.SoftMarginLoss` | 二分类（逻辑损失） |
+| `nn.MultiLabelSoftMarginLoss` | 多标签分类 |
+| `nn.CosineEmbeddingLoss` | 余弦相似度 |
+| `nn.MultiMarginLoss` | 多分类间隔损失 |
+| `nn.TripletMarginLoss` | 三元组损失 |
+| `nn.TripletMarginWithDistanceLoss` | 自定义距离的三元组损失 |
+| `nn.CTCLoss` | 序列识别（OCR、语音） |
+
+> 参考：[PyTorch Loss Functions 官方文档](https://pytorch.org/docs/stable/nn.html#loss-functions)
+
+---
+
+### 5.2 优化器
+
+优化器实现各种参数更新算法，位于 `torch.optim` 模块中。
+
+#### 5.2.1 Optimizer 基类
+
+所有优化器继承自 `torch.optim.Optimizer`，提供统一的接口：
+
+```python
+# 创建优化器
+optimizer = torch.optim.SGD(model.parameters(), lr=0.01)
+
+# 五个核心方法
+optimizer.zero_grad()        # 清零梯度
+optimizer.step()             # 更新参数
+optimizer.add_param_group()  # 添加参数组
+optimizer.state_dict()       # 保存优化器状态
+optimizer.load_state_dict()  # 加载优化器状态
+```
+
+#### 5.2.2 SGD（随机梯度下降）
+
+最基础的优化器，更新公式：
+
+$$w_{new} = w_{old} - lr \times \nabla w$$
+
+加入 L2 正则化（weight_decay）后：
+
+$$w_{new} = w_{old} \times (1 - lr \times weight\_decay) - lr \times \nabla w$$
+
+```python
+optimizer = torch.optim.SGD(
+    model.parameters(),
+    lr=0.01,            # 学习率
+    momentum=0.9,       # 动量（加速收敛）
+    weight_decay=1e-4,  # L2 正则化
+    dampening=0,        # 动量抑制
+    nesterov=False      # Nesterov 动量
+)
+```
+
+#### 5.2.3 Adam
+
+自适应学习率优化器，结合了动量和 RMSProp：
+
+```python
+optimizer = torch.optim.Adam(
+    model.parameters(),
+    lr=0.001,           # 学习率（默认 0.001）
+    betas=(0.9, 0.999), # 动量衰减系数
+    eps=1e-8,           # 数值稳定性
+    weight_decay=0,     # L2 正则化
+    amsgrad=False       # 是否使用 AMSGrad 变体
+)
+```
+
+#### 5.2.4 AdamW
+
+修正了 Adam 中 weight_decay 的实现（解耦权重衰减）：
+
+```python
+optimizer = torch.optim.AdamW(
+    model.parameters(),
+    lr=0.001,
+    weight_decay=0.01  # 解耦的权重衰减
+)
+```
+
+> **Adam vs AdamW：** AdamW 是目前推荐的默认选择，它正确地实现了权重衰减正则化。
+
+#### 5.2.5 参数组（Parameter Groups）
+
+可以为不同层设置不同的学习率：
+
+```python
+optimizer = torch.optim.SGD([
+    {'params': model.features.parameters(), 'lr': 0.001},    # 特征提取层：小学习率
+    {'params': model.classifier.parameters(), 'lr': 0.01},   # 分类器：大学习率
+], momentum=0.9)
+```
+
+#### 5.2.6 优化器状态保存与恢复
+
+```python
+# 保存
+torch.save(optimizer.state_dict(), 'optimizer.pth')
+
+# 加载
+optimizer.load_state_dict(torch.load('optimizer.pth'))
+```
+
+#### 5.2.7 PyTorch 全部 13 个优化器
+
+| 优化器 | 特点 |
+|-------|------|
+| `SGD` | 最基础，大多数论文使用 |
+| `Adam` | 自适应学习率，收敛快 |
+| `AdamW` | 解耦权重衰减的 Adam |
+| `Adadelta` | 自适应学习率，无需设定初始 lr |
+| `Adagrad` | 适合稀疏数据 |
+| `Adamax` | Adam 的 L∞ 变体 |
+| `SparseAdam` | 稀疏版 Adam |
+| `ASGD` | 平均随机梯度下降 |
+| `LBFGS` | 拟牛顿法（需特殊 step 调用） |
+| `NAdam` | 带 Nesterov 动量的 Adam |
+| `RAdam` | 带学习率方差矫正的 Adam |
+| `RMSprop` | 自适应学习率（Adam 的前身） |
+| `Rprop` | 仅用梯度符号更新 |
+
+> **实践建议：** 大多数论文仍使用 SGD 训练。Adam/AdamW 收敛更快，适合快速实验。
+
+---
+
+### 5.3 学习率调整器
+
+学习率调整器（LR Scheduler）在训练过程中动态调整学习率，位于 `torch.optim.lr_scheduler` 模块。
+
+#### 5.3.1 基类 _LRScheduler
+
+所有调整器继承自 `_LRScheduler`，核心属性：
+
+- `optimizer`：关联的优化器
+- `base_lrs`：初始学习率列表
+- `last_epoch`：当前 epoch 计数
+
+子类只需实现 `get_lr()` 方法。
+
+#### 5.3.2 常用学习率调整器
+
+##### 1. StepLR：固定步长衰减
+
+每隔 `step_size` 个 epoch，学习率乘以 `gamma`：
+
+```python
+scheduler = torch.optim.lr_scheduler.StepLR(
+    optimizer,
+    step_size=30,  # 每 30 个 epoch 衰减一次
+    gamma=0.1      # 衰减系数
+)
+
+# lr: 0.01 → (epoch 30) 0.001 → (epoch 60) 0.0001
+```
+
+##### 2. MultiStepLR：里程碑衰减
+
+在指定的 epoch 处衰减学习率：
+
+```python
+scheduler = torch.optim.lr_scheduler.MultiStepLR(
+    optimizer,
+    milestones=[30, 80],  # 在第 30 和 80 个 epoch 衰减
+    gamma=0.1
+)
+
+# lr: 0.01 → (epoch 30) 0.001 → (epoch 80) 0.0001
+```
+
+##### 3. ExponentialLR：指数衰减
+
+每个 epoch 学习率乘以 `gamma`：
+
+```python
+scheduler = torch.optim.lr_scheduler.ExponentialLR(
+    optimizer,
+    gamma=0.95  # 每 epoch 乘以 0.95
+)
+```
+
+##### 4. CosineAnnealingLR：余弦退火
+
+学习率按余弦曲线变化，从最大值平滑下降到最小值：
+
+```python
+scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+    optimizer,
+    T_max=50,      # 半周期长度
+    eta_min=1e-6   # 最小学习率
+)
+```
+
+##### 5. ReduceLROnPlateau：自适应衰减
+
+当监控指标停止改善时自动降低学习率：
+
+```python
+scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+    optimizer,
+    mode='min',       # 'min'：指标越小越好（loss）；'max'：越大越好（accuracy）
+    factor=0.1,       # 衰减系数
+    patience=10,      # 等待多少 epoch 不改善后衰减
+    min_lr=1e-6       # 最小学习率
+)
+
+# 注意：step 需要传入监控指标
+scheduler.step(val_loss)
+```
+
+##### 6. CosineAnnealingWarmRestarts：带热重启的余弦退火
+
+周期性重置学习率，避免陷入局部最优：
+
+```python
+scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
+    optimizer,
+    T_0=10,    # 初始周期长度
+    T_mult=2,  # 周期倍增系数
+    eta_min=0  # 最小学习率
+)
+```
+
+##### 7. OneCycleLR：一周期策略
+
+从低学习率开始，升高到最大值，再降回最低值：
+
+```python
+scheduler = torch.optim.lr_scheduler.OneCycleLR(
+    optimizer,
+    max_lr=0.01,         # 最大学习率
+    total_steps=1000,    # 总步数
+    pct_start=0.3,       # 升高阶段占比
+    anneal_strategy='cos' # 退火策略
+)
+```
+
+##### 8. LambdaLR：自定义调整策略
+
+通过自定义函数调整学习率：
+
+```python
+# Warmup + 衰减
+def lr_lambda(epoch):
+    if epoch < 10:
+        return epoch / 10  # 线性 warmup
+    return 0.95 ** (epoch - 10)  # 指数衰减
+
+scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lr_lambda)
+```
+
+#### 5.3.3 学习率调整器使用方式
+
+```python
+# 标准训练循环中使用 scheduler
+for epoch in range(num_epochs):
+    # 训练
+    model.train()
+    for inputs, labels in train_loader:
+        optimizer.zero_grad()
+        outputs = model(inputs)
+        loss = criterion(outputs, labels)
+        loss.backward()
+        optimizer.step()
+
+    # 验证
+    model.eval()
+    val_loss = evaluate(model, val_loader)
+
+    # 更新学习率（放在 epoch 循环末尾）
+    scheduler.step()  # 大多数 scheduler
+    # scheduler.step(val_loss)  # ReduceLROnPlateau 需要传入指标
+```
+
+#### 5.3.4 PyTorch 全部 14 个学习率调整器
+
+| 调整器 | 策略 |
+|-------|------|
+| `LambdaLR` | 自定义函数 |
+| `MultiplicativeLR` | 乘法因子函数 |
+| `StepLR` | 固定步长衰减 |
+| `MultiStepLR` | 里程碑衰减 |
+| `ConstantLR` | 恒定因子（到指定 epoch） |
+| `LinearLR` | 线性因子衰减 |
+| `ExponentialLR` | 指数衰减 |
+| `CosineAnnealingLR` | 余弦退火 |
+| `ChainedScheduler` | 链式组合多个调整器 |
+| `SequentialLR` | 按 epoch 顺序切换调整器 |
+| `ReduceLROnPlateau` | 指标停滞时衰减 |
+| `CyclicLR` | 循环学习率 |
+| `OneCycleLR` | 一周期策略 |
+| `CosineAnnealingWarmRestarts` | 余弦退火 + 热重启 |
+
+#### 5.3.5 学习率调整策略选择指南
+
+| 场景 | 推荐调整器 |
+|------|-----------|
+| 通用训练 | CosineAnnealingLR / MultiStepLR |
+| 需要 warmup | LambdaLR / OneCycleLR |
+| 不确定最佳 epoch | ReduceLROnPlateau |
+| 长时间训练 | CosineAnnealingWarmRestarts |
+| 快速收敛 | OneCycleLR |
+
+> 参考：[PyTorch Optimizer 官方文档](https://pytorch.org/docs/stable/optim.html)
+
+---
+
+## 第六章：PyTorch 可视化模块
+
+本章介绍可视化工具，帮助理解模型训练过程和内部机制。
+
+### 6.1 TensorBoard 安装与使用
+
+#### 6.1.1 安装与启动
+
+```bash
+# 安装
+pip install tensorboard
+
+# 启动（指定日志目录）
+tensorboard --logdir=runs
+
+# 指定端口
+tensorboard --logdir=runs --port=6007
+```
+
+访问 `http://localhost:6006/` 查看可视化界面。
+
+#### 6.1.2 SummaryWriter
+
+`SummaryWriter` 是 TensorBoard 的核心类，负责记录数据：
+
+```python
+from torch.utils.tensorboard import SummaryWriter
+
+# 创建 writer
+writer = SummaryWriter(
+    log_dir='runs/experiment_1',  # 日志目录
+    comment='baseline',           # 注释
+    flush_secs=120                # 刷新间隔（秒）
+)
+
+# 使用完毕后关闭
+writer.close()
+```
+
+#### 6.1.3 常用记录方法
+
+##### 1. add_scalar：记录标量
+
+```python
+# 记录训练损失
+for epoch in range(100):
+    train_loss = train_one_epoch()
+    val_loss = evaluate()
+
+    writer.add_scalar('Loss/train', train_loss, epoch)
+    writer.add_scalar('Loss/val', val_loss, epoch)
+    writer.add_scalar('Accuracy/val', val_acc, epoch)
+```
+
+> **标签分组：** 使用 `/` 分隔标签可以自动分组，如 `'Loss/train'` 和 `'Loss/val'` 会显示在同一个面板中。
+
+##### 2. add_scalars：在同一图表中绘制多条曲线
+
+```python
+writer.add_scalars('Loss', {
+    'train': train_loss,
+    'val': val_loss
+}, epoch)
+```
+
+##### 3. add_histogram：记录分布直方图
+
+```python
+# 记录参数分布变化
+for name, param in model.named_parameters():
+    writer.add_histogram(f'params/{name}', param, epoch)
+    if param.grad is not None:
+        writer.add_histogram(f'grads/{name}', param.grad, epoch)
+```
+
+##### 4. add_image / add_images：记录图像
+
+```python
+# 单张图像（CHW 格式）
+writer.add_image('sample', img_tensor, epoch)
+
+# 批量图像（NCHW 格式）
+writer.add_images('batch_samples', batch_tensor, epoch)
+```
+
+##### 5. add_graph：记录模型结构
+
+```python
+# 可视化模型计算图
+dummy_input = torch.randn(1, 3, 224, 224)
+writer.add_graph(model, dummy_input)
+```
+
+##### 6. add_figure：嵌入 matplotlib 图表
+
+```python
+import matplotlib.pyplot as plt
+
+fig, ax = plt.subplots()
+ax.plot([1, 2, 3], [1, 4, 9])
+writer.add_figure('my_plot', fig, epoch)
+plt.close(fig)
+```
+
+##### 7. 其他记录方法
+
+```python
+writer.add_text('info', 'Experiment description', 0)      # 文本
+writer.add_embedding(features, metadata=labels)             # 嵌入可视化
+writer.add_pr_curve('pr_curve', labels, predictions, epoch)  # PR 曲线
+writer.add_hparams(hparam_dict, metric_dict)                 # 超参数对比
+```
+
+#### 6.1.4 TensorBoard 最佳实践
+
+```python
+# 完整使用示例
+writer = SummaryWriter(f'runs/{experiment_name}')
+
+for epoch in range(num_epochs):
+    # 训练
+    model.train()
+    for batch_idx, (inputs, labels) in enumerate(train_loader):
+        outputs = model(inputs)
+        loss = criterion(outputs, labels)
+        loss.backward()
+        optimizer.step()
+        optimizer.zero_grad()
+
+        # 记录每个 batch 的损失
+        global_step = epoch * len(train_loader) + batch_idx
+        writer.add_scalar('Loss/train_step', loss.item(), global_step)
+
+    # 记录每个 epoch 的指标
+    writer.add_scalar('Loss/train_epoch', avg_train_loss, epoch)
+    writer.add_scalar('Loss/val_epoch', avg_val_loss, epoch)
+    writer.add_scalar('LR', optimizer.param_groups[0]['lr'], epoch)
+
+writer.close()
+```
+
+---
+
+### 6.2 CNN 卷积核与特征图可视化
+
+#### 6.2.1 make_grid 函数
+
+将一组图片拼接成网格图，便于可视化：
+
+```python
+from torchvision.utils import make_grid
+
+# 将一批图片拼成网格
+grid = make_grid(
+    tensor,          # (B, C, H, W) 或图片列表
+    nrow=8,          # 每行显示的图片数
+    normalize=True,  # 是否归一化到 (0, 1)
+    padding=2        # 图片间间距
+)
+```
+
+#### 6.2.2 卷积核可视化
+
+卷积核是 4D 张量 `(out_channels, in_channels, H, W)`：
+
+```python
+import torchvision.models as models
+
+alexnet = models.alexnet(pretrained=True)
+
+# 提取卷积核
+for name, module in alexnet.named_modules():
+    if isinstance(module, nn.Conv2d):
+        kernels = module.weight  # (out_ch, in_ch, H, W)
+        print(f"{name}: {kernels.shape}")
+
+        # 第一层可以可视化为 RGB 图像
+        if kernels.shape[1] == 3:
+            grid = make_grid(kernels, nrow=8, normalize=True)
+            # 使用 matplotlib 显示
+```
+
+> **第一层**卷积核有 3 个输入通道，可直接可视化为 RGB 图像；**其余层**只能逐通道以灰度图显示。
+
+#### 6.2.3 特征图可视化
+
+特征图是中间计算结果，需要特殊方式获取：
+
+**方法一：逐层前向传播（简单但不优雅）**
+
+```python
+# 手动提取每一层并逐步执行
+conv1 = alexnet.features[0]
+fmap_1 = conv1(img_tensor)
+
+# 可视化
+grid = make_grid(fmap_1.squeeze(0).unsqueeze(1), nrow=8, normalize=True)
+```
+
+**方法二：使用 Hook 函数（推荐）**
+
+```python
+fmap_dict = {}
+
+def hook_fn(name):
+    def hook(module, input, output):
+        fmap_dict[name] = output.detach()
+    return hook
+
+# 注册到所有卷积层
+for name, module in alexnet.named_modules():
+    if isinstance(module, nn.Conv2d):
+        module.register_forward_hook(hook_fn(name))
+
+# 前向传播后，所有特征图自动保存在 fmap_dict 中
+output = alexnet(img_tensor)
+```
+
+#### 6.2.4 可视化的意义
+
+通过可视化可以发现：
+
+- 边缘检测卷积核能过滤掉大部分细节，仅留下边缘轮廓
+- 颜色卷积核保留更清晰的原始图像信息
+- 深层特征图越来越抽象，浅层保留更多空间细节
+
+---
+
+### 6.3 混淆矩阵与训练曲线可视化
+
+#### 6.3.1 混淆矩阵
+
+混淆矩阵是 N×N 方阵，行表示真实类别，列表示预测类别：
+
+```python
+import numpy as np
+import matplotlib.pyplot as plt
+
+def compute_confusion_matrix(model, data_loader, num_classes, device):
+    """计算混淆矩阵。"""
+    conf_matrix = np.zeros((num_classes, num_classes), dtype=int)
+
+    model.eval()
+    with torch.no_grad():
+        for inputs, labels in data_loader:
+            inputs, labels = inputs.to(device), labels.to(device)
+            outputs = model(inputs)
+            preds = outputs.argmax(dim=1)
+
+            for t, p in zip(labels, preds):
+                conf_matrix[t.item()][p.item()] += 1
+
+    return conf_matrix
+
+def plot_confusion_matrix(conf_matrix, classes, save_path=None):
+    """绘制混淆矩阵。"""
+    fig, ax = plt.subplots(figsize=(10, 8))
+    im = ax.imshow(conf_matrix, cmap='Blues')
+
+    ax.set_xticks(range(len(classes)))
+    ax.set_yticks(range(len(classes)))
+    ax.set_xticklabels(classes, rotation=45)
+    ax.set_yticklabels(classes)
+    ax.set_xlabel('Predicted')
+    ax.set_ylabel('True')
+    ax.set_title('Confusion Matrix')
+
+    # 在每个格子中显示数值
+    for i in range(len(classes)):
+        for j in range(len(classes)):
+            ax.text(j, i, str(conf_matrix[i, j]),
+                    ha='center', va='center')
+
+    plt.colorbar(im)
+    plt.tight_layout()
+    if save_path:
+        plt.savefig(save_path)
+    plt.close(fig)
+    return fig
+```
+
+#### 6.3.2 训练曲线可视化
+
+使用 TensorBoard 的 `add_scalars` 同时绘制训练和验证曲线：
+
+```python
+# 在训练循环中记录
+writer.add_scalars('Loss', {
+    'train': train_loss,
+    'val': val_loss
+}, epoch)
+
+writer.add_scalars('Accuracy', {
+    'train': train_acc,
+    'val': val_acc
+}, epoch)
+```
+
+通过观察训练曲线可以判断：
+
+- **训练/验证损失同时下降：** 正常训练
+- **训练损失下降，验证损失上升：** 过拟合
+- **两者都很高：** 欠拟合
+- **训练损失震荡：** 学习率过大
+
+---
+
+### 6.4 CAM 可视化
+
+#### 6.4.1 CAM 算法演变
+
+##### 1. CAM (2016)
+
+原始方法，需要修改模型架构（将最后的全连接层替换为全局平均池化 + 全连接层），然后重新训练。通过全连接层权重加权特征图生成热力图。
+
+##### 2. Grad-CAM (2017)
+
+无需修改模型，用梯度替代权重：
+
+- 对目标类别计算最后一层卷积特征图的梯度
+- 通过全局平均池化将 2D 梯度矩阵转为标量权重
+- 加权求和特征图并通过 ReLU（只关注正值）
+
+##### 3. Grad-CAM++ (2018)
+
+改进了多物体场景下的定位精度，对特征图梯度上各元素赋予不同的重要程度权重。
+
+#### 6.4.2 Grad-CAM 的实际应用
+
+- **模型诊断：** 检查模型是否学习到了正确的特征
+- **数据增强指导：** 发现模型依赖背景特征后，可使用 Cutout 等方法
+- **弱监督分割：** 利用 CAM 热力图作为伪标签
+
+> 详细实现参见 4.5 节 Hook 函数部分。
+
+---
+
+### 6.5 模型参数打印
+
+#### 6.5.1 torchinfo 库
+
+`torchinfo` 是查看模型结构和参数量的推荐工具（替代已弃用的 `torchsummary`）：
+
+```bash
+pip install torchinfo
+```
+
+```python
+from torchinfo import summary
+
+model = models.resnet50()
+
+# 打印模型信息
+summary(
+    model,
+    input_size=(1, 3, 224, 224),  # 输入尺寸
+    col_names=["input_size", "output_size", "num_params", "mult_adds"],
+    depth=3,       # 显示深度
+    verbose=1      # 输出详细程度（0-2）
+)
+```
+
+**ResNet-50 统计信息示例：**
+
+| 指标 | 数值 |
+|------|------|
+| 总参数量 | 25,557,032 |
+| 计算量 | 4.09 GFLOPs |
+| 输入存储 | 0.60 MB |
+| 参数存储 | 102.23 MB |
+
+#### 6.5.2 手动统计参数量
+
+```python
+# 统计总参数量
+total_params = sum(p.numel() for p in model.parameters())
+print(f"Total parameters: {total_params:,}")
+
+# 统计可训练参数量
+trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+print(f"Trainable parameters: {trainable_params:,}")
+
+# 按层统计
+for name, param in model.named_parameters():
+    print(f"{name}: {param.numel():,} params, shape={param.shape}")
+```
+
+> 参考：[TensorBoard 官方文档](https://www.tensorflow.org/tensorboard) | [torchinfo GitHub](https://github.com/TylerYep/torchinfo)
+
+---
+
+## 第七章：PyTorch 小技巧汇总
+
+本章介绍开发过程中常用的实用技巧和工具。
+
+### 7.1 模型保存与加载
+
+#### 7.1.1 核心概念
+
+- **序列化（Serialization）：** 将内存中的对象转换为二进制序列，持久化到磁盘
+- **反序列化（Deserialization）：** 将二进制序列恢复为内存中的对象
+
+#### 7.1.2 基本函数
+
+```python
+# 保存
+torch.save(obj, f)
+
+# 加载
+torch.load(f, map_location=None)
+```
+
+**map_location 参数（跨设备加载）：**
+
+```python
+# GPU → CPU
+state_dict = torch.load('model.pth', map_location='cpu')
+
+# CPU → GPU
+state_dict = torch.load('model.pth', map_location='cuda:0')
+
+# GPU:1 → GPU:0
+state_dict = torch.load('model.pth', map_location={'cuda:1': 'cuda:0'})
+```
+
+#### 7.1.3 两种保存方式
+
+**方式一：保存整个模型（不推荐）**
+
+```python
+# 保存：包含模型结构 + 参数 + buffer + hook
+torch.save(model, 'model_full.pth')
+
+# 加载
+model = torch.load('model_full.pth')
+```
+
+> **缺点：** 依赖具体的类定义和目录结构，迁移性差。
+
+**方式二：仅保存参数（推荐）**
+
+```python
+# 保存：只保存 state_dict
+torch.save(model.state_dict(), 'model_weights.pth')
+
+# 加载：需要先创建模型实例
+model = MyModel()
+model.load_state_dict(torch.load('model_weights.pth'))
+```
+
+#### 7.1.4 断点续训（Checkpoint）
+
+保存完整的训练状态，支持中断后恢复训练：
+
+```python
+# 保存 checkpoint
+def save_checkpoint(model, optimizer, scheduler, epoch, path):
+    checkpoint = {
+        'model': model.state_dict(),
+        'optimizer': optimizer.state_dict(),
+        'lr_scheduler': scheduler.state_dict(),
+        'epoch': epoch,
+        'best_metric': best_metric,
+    }
+    torch.save(checkpoint, path)
+
+# 加载 checkpoint
+def load_checkpoint(model, optimizer, scheduler, path):
+    checkpoint = torch.load(path, map_location='cpu')
+    model.load_state_dict(checkpoint['model'])
+    optimizer.load_state_dict(checkpoint['optimizer'])
+    scheduler.load_state_dict(checkpoint['lr_scheduler'])
+    start_epoch = checkpoint['epoch'] + 1
+    return start_epoch
+```
+
+---
+
+### 7.2 Finetune 模型微调
+
+#### 7.2.1 迁移学习概念
+
+迁移学习将源领域学到的知识迁移到目标领域，在目标领域数据不足时非常有效。模型的特征提取层学到的通用特征（边缘、纹理、形状）可以跨任务复用。
+
+#### 7.2.2 方法一：冻结特征提取层
+
+只训练分类器，冻结其余参数：
+
+```python
+import torchvision.models as models
+
+# 加载预训练模型
+resnet18 = models.resnet18(weights=models.ResNet18_Weights.DEFAULT)
+
+# 冻结所有参数
+for param in resnet18.parameters():
+    param.requires_grad = False
+
+# 替换分类器（新层默认 requires_grad=True）
+num_classes = 10
+resnet18.fc = nn.Linear(resnet18.fc.in_features, num_classes)
+
+# 只有 fc 层会被训练
+optimizer = torch.optim.Adam(resnet18.fc.parameters(), lr=0.001)
+```
+
+#### 7.2.3 方法二：差异学习率
+
+不同层使用不同学习率，特征提取层用小学习率微调，分类器用大学习率：
+
+```python
+resnet18 = models.resnet18(weights=models.ResNet18_Weights.DEFAULT)
+
+# 替换分类器
+resnet18.fc = nn.Linear(resnet18.fc.in_features, num_classes)
+
+# 获取除 fc 外的所有参数
+fc_params = list(map(id, resnet18.fc.parameters()))
+base_params = filter(lambda p: id(p) not in fc_params, resnet18.parameters())
+
+# 差异学习率
+optimizer = torch.optim.SGD([
+    {'params': base_params, 'lr': 0.001},          # 特征提取层：小学习率
+    {'params': resnet18.fc.parameters(), 'lr': 0.01}  # 分类器：大学习率（10倍）
+], momentum=0.9)
+```
+
+#### 7.2.4 微调最佳实践
+
+| 策略 | 数据量小 | 数据量大 |
+|------|---------|---------|
+| 与预训练数据相似 | 冻结特征层，只训练分类器 | 差异学习率微调全部 |
+| 与预训练数据不同 | 冻结浅层，微调深层 + 分类器 | 较大学习率微调全部 |
+
+---
+
+### 7.3 GPU 使用
+
+#### 7.3.1 CPU vs GPU
+
+- **CPU：** 强调控制单元，适合复杂逻辑
+- **GPU：** 强调计算单元，适合大规模并行的数值运算（深度学习）
+
+#### 7.3.2 设备管理
+
+```python
+# 设置设备
+device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
+
+# 数据迁移
+# Tensor：非原地操作，需要重新赋值
+x = torch.randn(3, 3)
+x = x.to(device)           # 必须重新赋值
+x = x.to(torch.float16)    # 也可以转换精度
+
+# Model：原地操作，不需要重新赋值
+model = MyModel()
+model.to(device)            # 不需要重新赋值
+```
+
+#### 7.3.3 常用 CUDA 函数
+
+```python
+import torch
+
+# 检查与查询
+torch.cuda.is_available()        # CUDA 是否可用
+torch.cuda.device_count()        # GPU 数量
+torch.cuda.current_device()      # 当前 GPU 索引
+torch.cuda.get_device_name(0)    # GPU 名称
+
+# 显存管理
+torch.cuda.mem_get_info()        # 查询空闲/总显存
+torch.cuda.empty_cache()         # 清理显存碎片
+
+# 性能与确定性
+torch.backends.cudnn.benchmark = True       # 自动选择最优卷积算法（加速）
+torch.backends.cudnn.deterministic = True   # 确保结果可复现
+```
+
+#### 7.3.4 多 GPU 训练：DataParallel
+
+```python
+# 简单的多 GPU 并行
+model = MyModel()
+if torch.cuda.device_count() > 1:
+    model = nn.DataParallel(model, device_ids=[0, 1, 2, 3])
+model.to(device)
+```
+
+**DataParallel 工作流程：**
+
+1. 数据沿 batch 维度拆分到 N 个 GPU
+2. 模型参数复制到 N 个 GPU
+3. 每个 GPU 独立前向传播
+4. 结果汇聚到主 GPU
+
+#### 7.3.5 多 GPU 模型加载问题
+
+使用 DataParallel 训练的模型，state_dict 的键会多出 `module.` 前缀：
+
+```python
+# 方法一：去除 "module." 前缀
+from collections import OrderedDict
+
+state_dict = torch.load('model.pth')
+new_state_dict = OrderedDict()
+for k, v in state_dict.items():
+    name = k[7:] if k.startswith('module.') else k
+    new_state_dict[name] = v
+model.load_state_dict(new_state_dict)
+
+# 方法二：先包装再加载
+model = nn.DataParallel(model)
+model.load_state_dict(torch.load('model.pth'))
+```
+
+#### 7.3.6 GPU 可见性控制
+
+```python
+import os
+
+# 在 CUDA 初始化之前设置
+os.environ['CUDA_VISIBLE_DEVICES'] = '2,3'
+
+# 此后 GPU 2 → cuda:0，GPU 3 → cuda:1
+```
+
+---
+
+### 7.4 模型训练代码模板
+
+#### 7.4.1 完整训练框架
+
+```python
+import argparse
+import logging
+import os
+import time
+from datetime import datetime
+
+import torch
+import torch.nn as nn
+from torch.utils.data import DataLoader
+from torch.utils.tensorboard import SummaryWriter
+
+
+def parse_args():
+    """解析命令行参数。"""
+    parser = argparse.ArgumentParser(description='Training Script')
+    parser.add_argument('--batch-size', type=int, default=32)
+    parser.add_argument('--epochs', type=int, default=100)
+    parser.add_argument('--lr', type=float, default=0.01)
+    parser.add_argument('--momentum', type=float, default=0.9)
+    parser.add_argument('--weight-decay', type=float, default=1e-4)
+    parser.add_argument('--output-dir', type=str, default='outputs')
+    parser.add_argument('--resume', type=str, default='', help='checkpoint path')
+    return parser.parse_args()
+
+
+class AverageMeter:
+    """计算并存储平均值和当前值。"""
+    def __init__(self):
+        self.reset()
+
+    def reset(self):
+        self.val = 0
+        self.avg = 0
+        self.sum = 0
+        self.count = 0
+
+    def update(self, val, n=1):
+        self.val = val
+        self.sum += val * n
+        self.count += n
+        self.avg = self.sum / self.count
+
+
+def setup_logger(output_dir):
+    """配置日志记录。"""
+    logger = logging.getLogger(__name__)
+    logger.setLevel(logging.INFO)
+
+    formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+
+    # 文件 handler
+    fh = logging.FileHandler(os.path.join(output_dir, 'training.log'))
+    fh.setFormatter(formatter)
+    logger.addHandler(fh)
+
+    # 控制台 handler
+    ch = logging.StreamHandler()
+    ch.setFormatter(formatter)
+    logger.addHandler(ch)
+
+    return logger
+
+
+def train_one_epoch(model, train_loader, criterion, optimizer, device):
+    """训练一个 epoch。"""
+    model.train()
+    loss_meter = AverageMeter()
+    acc_meter = AverageMeter()
+
+    for inputs, labels in train_loader:
+        inputs, labels = inputs.to(device), labels.to(device)
+
+        outputs = model(inputs)
+        loss = criterion(outputs, labels)
+
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+
+        # 计算准确率
+        preds = outputs.argmax(dim=1)
+        acc = (preds == labels).float().mean()
+
+        loss_meter.update(loss.item(), inputs.size(0))
+        acc_meter.update(acc.item(), inputs.size(0))
+
+    return loss_meter.avg, acc_meter.avg
+
+
+@torch.no_grad()
+def evaluate(model, val_loader, criterion, device):
+    """验证/测试。"""
+    model.eval()
+    loss_meter = AverageMeter()
+    acc_meter = AverageMeter()
+
+    for inputs, labels in val_loader:
+        inputs, labels = inputs.to(device), labels.to(device)
+
+        outputs = model(inputs)
+        loss = criterion(outputs, labels)
+
+        preds = outputs.argmax(dim=1)
+        acc = (preds == labels).float().mean()
+
+        loss_meter.update(loss.item(), inputs.size(0))
+        acc_meter.update(acc.item(), inputs.size(0))
+
+    return loss_meter.avg, acc_meter.avg
+
+
+def main():
+    args = parse_args()
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+    # 创建输出目录
+    timestamp = datetime.now().strftime('%Y-%m-%d-%H%M%S')
+    output_dir = os.path.join(args.output_dir, timestamp)
+    os.makedirs(output_dir, exist_ok=True)
+
+    logger = setup_logger(output_dir)
+    writer = SummaryWriter(log_dir=os.path.join(output_dir, 'tb_logs'))
+
+    # 构建模型、损失函数、优化器、调度器
+    model = build_model().to(device)
+    criterion = nn.CrossEntropyLoss()
+    optimizer = torch.optim.SGD(
+        model.parameters(), lr=args.lr,
+        momentum=args.momentum, weight_decay=args.weight_decay
+    )
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, T_max=args.epochs
+    )
+
+    # 断点续训
+    start_epoch = 0
+    best_acc = 0.0
+    if args.resume:
+        checkpoint = torch.load(args.resume, map_location='cpu')
+        model.load_state_dict(checkpoint['model'])
+        optimizer.load_state_dict(checkpoint['optimizer'])
+        scheduler.load_state_dict(checkpoint['lr_scheduler'])
+        start_epoch = checkpoint['epoch'] + 1
+        best_acc = checkpoint.get('best_acc', 0.0)
+        logger.info(f"Resumed from epoch {start_epoch}")
+
+    # 训练循环
+    for epoch in range(start_epoch, args.epochs):
+        train_loss, train_acc = train_one_epoch(
+            model, train_loader, criterion, optimizer, device
+        )
+        val_loss, val_acc = evaluate(
+            model, val_loader, criterion, device
+        )
+        scheduler.step()
+
+        # 日志记录
+        lr = optimizer.param_groups[0]['lr']
+        logger.info(
+            f"Epoch [{epoch+1}/{args.epochs}] "
+            f"Train Loss: {train_loss:.4f} Acc: {train_acc:.4f} | "
+            f"Val Loss: {val_loss:.4f} Acc: {val_acc:.4f} | LR: {lr:.6f}"
+        )
+
+        # TensorBoard 记录
+        writer.add_scalars('Loss', {'train': train_loss, 'val': val_loss}, epoch)
+        writer.add_scalars('Accuracy', {'train': train_acc, 'val': val_acc}, epoch)
+        writer.add_scalar('LR', lr, epoch)
+
+        # 保存最优模型
+        if val_acc > best_acc:
+            best_acc = val_acc
+            torch.save(model.state_dict(),
+                       os.path.join(output_dir, 'best_model.pth'))
+
+        # 保存 checkpoint
+        checkpoint = {
+            'model': model.state_dict(),
+            'optimizer': optimizer.state_dict(),
+            'lr_scheduler': scheduler.state_dict(),
+            'epoch': epoch,
+            'best_acc': best_acc,
+        }
+        torch.save(checkpoint, os.path.join(output_dir, 'checkpoint_latest.pth'))
+
+    writer.close()
+    logger.info(f"Training complete. Best accuracy: {best_acc:.4f}")
+```
+
+#### 7.4.2 推荐参考项目
+
+- PyTorch 官方 ImageNet 训练示例
+- NVIDIA Apex ImageNet 实现
+- TIMM（Timm Image Models）训练脚本
+
+---
+
+### 7.5 TorchMetrics 模型评估指标库
+
+#### 7.5.1 安装
+
+```bash
+pip install torchmetrics
+```
+
+#### 7.5.2 核心使用流程
+
+三步工作模式：创建 → 更新 → 计算
+
+```python
+import torchmetrics
+
+# 1. 创建指标评价器
+metric = torchmetrics.Accuracy(task='multiclass', num_classes=10)
+
+# 2. 逐批更新
+for inputs, labels in data_loader:
+    preds = model(inputs)
+    metric.update(preds, labels)
+    # 或者直接调用：acc = metric(preds, labels)
+
+# 3. 计算全数据集指标
+final_acc = metric.compute()
+print(f"Accuracy: {final_acc:.4f}")
+
+# 重置（开始新一轮评估时）
+metric.reset()
+```
+
+#### 7.5.3 常用指标
+
+```python
+# 分类指标
+acc = torchmetrics.Accuracy(task='multiclass', num_classes=10)
+f1 = torchmetrics.F1Score(task='multiclass', num_classes=10, average='macro')
+precision = torchmetrics.Precision(task='multiclass', num_classes=10)
+recall = torchmetrics.Recall(task='multiclass', num_classes=10)
+auroc = torchmetrics.AUROC(task='multiclass', num_classes=10)
+
+# 图像指标
+psnr = torchmetrics.image.PeakSignalNoiseRatio()
+ssim = torchmetrics.image.StructuralSimilarityIndexMeasure()
+fid = torchmetrics.image.FrechetInceptionDistance()
+
+# 检测指标
+mAP = torchmetrics.detection.MeanAveragePrecision()
+```
+
+#### 7.5.4 自定义指标
+
+```python
+class MyMetric(torchmetrics.Metric):
+    def __init__(self):
+        super().__init__()
+        self.add_state("correct", default=torch.tensor(0), dist_reduce_fx="sum")
+        self.add_state("total", default=torch.tensor(0), dist_reduce_fx="sum")
+
+    def update(self, preds, target):
+        self.correct += (preds.argmax(dim=1) == target).sum()
+        self.total += target.numel()
+
+    def compute(self):
+        return self.correct.float() / self.total
+```
+
+> **优势：** 所有指标继承自 `nn.Module`，天然支持分布式训练中的指标聚合。
+
+---
+
+### 7.6 Albumentations 数据增强库
+
+#### 7.6.1 与 torchvision.transforms 的区别
+
+`torchvision.transforms` 主要面向分类任务；而 **Albumentations** 支持图像分割、目标检测、关键点检测等需要同步变换标签的任务。
+
+#### 7.6.2 安装
+
+```bash
+pip install -U albumentations
+```
+
+#### 7.6.3 基本用法
+
+```python
+import albumentations as A
+from albumentations.pytorch import ToTensorV2
+
+# 定义变换
+transform = A.Compose([
+    A.Resize(256, 256),
+    A.RandomCrop(224, 224),
+    A.HorizontalFlip(p=0.5),
+    A.RandomBrightnessContrast(p=0.2),
+    A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+    ToTensorV2(),
+])
+
+# 分类任务
+augmented = transform(image=image_rgb)
+image_tensor = augmented['image']
+
+# 分割任务（图像和掩码同步变换）
+augmented = transform(image=image_rgb, mask=mask)
+image_tensor = augmented['image']
+mask_tensor = augmented['mask']
+
+# 目标检测（图像和边界框同步变换）
+transform_det = A.Compose([
+    A.Resize(256, 256),
+    A.HorizontalFlip(p=0.5),
+], bbox_params=A.BboxParams(format='pascal_voc', label_fields=['labels']))
+
+augmented = transform_det(image=image, bboxes=bboxes, labels=labels)
+```
+
+#### 7.6.4 变换类型
+
+**像素级变换（ImageOnlyTransform）** —— 只改变像素值，不影响标签：
+
+- `Blur`、`GaussNoise`、`CLAHE`、`RandomBrightnessContrast`、`RGBShift`、`ChannelDropout`
+
+**空间级变换（DualTransform）** —— 同时变换图像和标签：
+
+- `Resize`、`Flip`、`Rotate`、`ShiftScaleRotate`、`ElasticTransform`、`Perspective`、`CropAndPad`
+
+#### 7.6.5 在 Dataset 中使用
+
+```python
+class SegmentationDataset(Dataset):
+    def __init__(self, image_paths, mask_paths, transform=None):
+        self.image_paths = image_paths
+        self.mask_paths = mask_paths
+        self.transform = transform
+
+    def __getitem__(self, idx):
+        image = cv2.imread(self.image_paths[idx])
+        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        mask = cv2.imread(self.mask_paths[idx], cv2.IMREAD_GRAYSCALE)
+
+        if self.transform:
+            augmented = self.transform(image=image, mask=mask)
+            image = augmented['image']
+            mask = augmented['mask']
+
+        return image, mask
+
+    def __len__(self):
+        return len(self.image_paths)
+```
+
+---
+
+### 7.7 TorchEnsemble 模型集成库
+
+#### 7.7.1 概念
+
+模型集成（Ensemble）通过组合多个基学习器来提升性能。
+
+#### 7.7.2 安装
+
+```bash
+pip install torchensemble
+```
+
+#### 7.7.3 九种集成方法
+
+| 方法 | 类型 | 原理 |
+|------|------|------|
+| Fusion | 并行 | 先平均输出，再 Softmax |
+| Voting | 并行 | 先 Softmax，再平均概率 |
+| Neural Forest | 并行 | 并行投票架构 |
+| Bagging | 并行 | 有放回采样 + 并行训练 |
+| Gradient Boosting | 串行 | 逐步纠正前一个模型的误差 |
+| Snapshot Ensemble | 串行 | 利用训练中的多个局部最优点 |
+| Adversarial Training | 并行 | 对抗样本增强的集成 |
+| Fast Geometric Ensemble | 串行 | 几何快照集成 |
+| Soft Gradient Boosting | 并行 | 并行化的 Boosting |
+
+#### 7.7.4 使用示例
+
+```python
+from torchensemble import VotingClassifier
+
+# 定义基学习器
+model = VotingClassifier(
+    estimator=ResNet,         # 基模型类
+    n_estimators=3,           # 基模型数量
+    cuda=True
+)
+
+# 设置优化器
+model.set_optimizer('Adam', lr=1e-3)
+
+# 训练
+model.fit(train_loader, epochs=100)
+
+# 预测
+accuracy = model.evaluate(test_loader)
+```
+
+#### 7.7.5 手动实现集成
+
+```python
+# 方法一：使用 ModuleList
+class EnsembleModel(nn.Module):
+    def __init__(self, models):
+        super().__init__()
+        self.models = nn.ModuleList(models)
+
+    def forward(self, x):
+        outputs = [model(x) for model in self.models]
+        return torch.stack(outputs).mean(dim=0)
+
+# 方法二：简单投票
+from collections import Counter
+
+def ensemble_predict(models, inputs):
+    predictions = []
+    for model in models:
+        model.eval()
+        with torch.no_grad():
+            output = model(inputs)
+            pred = output.argmax(dim=1)
+            predictions.append(pred)
+
+    # 多数投票
+    final_preds = []
+    for i in range(inputs.size(0)):
+        votes = [p[i].item() for p in predictions]
+        final_preds.append(Counter(votes).most_common(1)[0][0])
+
+    return torch.tensor(final_preds)
+```
+
+> 实验表明，3 个 ResNet 基模型在 CIFAR-10 上集成后，准确率可提升约 3 个百分点。
+
+---
+
+### 7.8 第七章总结
+
+本章介绍了 PyTorch 开发中的实用技巧：
+
+1. **模型保存与加载**
+   - 推荐保存 `state_dict` 而非整个模型
+   - 使用 checkpoint 实现断点续训
+   - 注意 `map_location` 处理跨设备加载
+
+2. **模型微调**
+   - 冻结特征层 + 训练分类器（数据少时）
+   - 差异学习率微调全部层（数据多时）
+
+3. **GPU 使用**
+   - `to(device)` 迁移数据和模型
+   - DataParallel 实现多 GPU 并行
+   - 注意 `module.` 前缀问题
+
+4. **训练代码模板**
+   - argparse 管理超参数
+   - AverageMeter 跟踪指标
+   - TensorBoard 记录训练过程
+   - 完整的训练/验证/保存流程
+
+5. **实用工具库**
+   - TorchMetrics：80+ 评估指标，支持分布式
+   - Albumentations：强大的数据增强，支持分割和检测
+   - TorchEnsemble：9 种模型集成方法
+
+> 参考：[PyTorch 官方教程](https://pytorch.org/tutorials/) | [TorchMetrics 文档](https://torchmetrics.readthedocs.io/) | [Albumentations 文档](https://albumentations.ai/)
+
+---
